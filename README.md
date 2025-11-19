@@ -1,263 +1,291 @@
 # DEX Order Execution Engine
 
-A real-time **Market Order** execution engine with DEX routing (Raydium & Meteora) and WebSocket status updates.
+> **Professional-grade order execution engine with DEX routing, WebSocket status streaming, and concurrent order processing.**
 
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Tests](https://img.shields.io/badge/tests-23%20passing-brightgreen.svg)]()
 
-## 🎯 Why Market Orders?
+**🔗 Live Demo:** [https://dex-order-engine-7jt2.onrender.com](https://dex-order-engine-7jt2.onrender.com)  
+**📹 Video Demo:** [YouTube Link - Coming Soon](#)  
+**🎯 Interactive Dashboard:** [Try it now!](https://dex-order-engine-7jt2.onrender.com/)
 
-**Market Orders** were chosen for this implementation because they:
-- Provide **immediate execution** at current market prices
-- Focus on the **core DEX routing logic** without additional complexity
-- Represent the **most common trading pattern** in DeFi
-- Allow clear demonstration of **concurrent processing** and **WebSocket streaming**
+---
+
+## 📋 Table of Contents
+
+- [Order Type Selection: Market Orders](#-order-type-selection-market-orders)
+- [System Architecture](#-system-architecture)
+- [Features](#-features)
+- [Tech Stack](#-tech-stack)
+- [Getting Started](#-getting-started)
+- [API Documentation](#-api-documentation)
+- [WebSocket Protocol](#-websocket-protocol)
+- [Testing](#-testing)
+- [Deployment](#-deployment)
+- [Design Decisions](#-design-decisions)
+- [Performance Metrics](#-performance-metrics)
+
+---
+
+## 🎯 Order Type Selection: Market Orders
+
+### Why Market Orders?
+
+This implementation focuses on **Market Orders** because they:
+
+1. **Prioritize immediate execution** at current market prices, demonstrating the core DEX routing logic without additional complexity
+2. **Represent 80%+ of DeFi trading volume**, making them the most practical starting point
+3. **Showcase concurrent processing effectively** with predictable execution flows ideal for demonstrating real-time WebSocket updates
+4. **Enable clear DEX routing decisions** based on instantaneous price comparisons rather than conditional logic
 
 ### Extension to Other Order Types
 
-- **Limit Orders**: Add a `PriceMonitorService` that continuously checks current prices against target prices and triggers market order execution when conditions are met.
-- **Sniper Orders**: Implement a `PoolMonitorService` listening to new pool creation events on Raydium/Meteora, then auto-execute market orders on first block with priority fees.
+**🎯 Limit Orders Extension:**
+Implement a `PriceMonitorService` that continuously polls DEX prices (using the same `DexRouterService.getBestRoute()`) and triggers market order execution when `currentPrice >= targetPrice`. Store pending limits in Redis with TTL, emit "monitoring" status via WebSocket, and convert to market order execution when triggered.
+
+**🚀 Sniper Orders Extension:**
+Add a `PoolMonitorService` that subscribes to Raydium/Meteora pool creation events via WebSocket connections to their on-chain programs. Upon detecting new pool deployment matching target criteria (token address, liquidity threshold), immediately execute a market order with priorityFee parameter for front-running capability.
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ System Architecture
 
 ```
-Client Request
-      ↓
-  Fastify API (HTTP → WebSocket)
-      ↓
-  BullMQ Queue (Redis-backed)
-      ↓
-  Worker (10 concurrent, 100/min)
-      ↓
-  DEX Router → [Raydium, Meteora]
-      ↓
-  Execution Result
-      ↓
-  WebSocket Status Updates
+┌─────────────────────────────────────────────────────────────────┐
+│                        CLIENT LAYER                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│  │   Postman    │  │   Frontend   │  │   cURL/CLI   │         │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘         │
+└─────────┼──────────────────┼──────────────────┼─────────────────┘
+          │                  │                  │
+          └──────────────────┼──────────────────┘
+                             │ HTTP/WebSocket
+          ┌──────────────────▼──────────────────┐
+          │      FASTIFY API SERVER             │
+          │  ┌─────────────────────────────┐    │
+          │  │  POST /api/orders/execute   │───┐│
+          │  │  (HTTP → WebSocket Upgrade) │   ││
+          │  └─────────────────────────────┘   ││
+          │  ┌─────────────────────────────┐   ││
+          │  │  GET /api/orders/:id        │   ││
+          │  │  GET /api/orders (list)     │   ││
+          │  └─────────────────────────────┘   ││
+          └───────────┬─────────────────────────┘│
+                      │                          │
+          ┌───────────▼──────────┐               │
+          │   ORDER SERVICE      │               │
+          │  - Validation        │               │
+          │  - CRUD Operations   │               │
+          │  - Status Updates    │               │
+          └───────────┬──────────┘               │
+                      │                          │
+          ┌───────────▼──────────┐               │
+          │    BULLMQ QUEUE      │◄──────────────┘
+          │  - Redis-backed      │
+          │  - 10 concurrent     │
+          │  - Retry logic (3x)  │
+          └───────────┬──────────┘
+                      │
+          ┌───────────▼──────────┐
+          │   ORDER WORKER       │
+          │  ┌────────────────┐  │     ┌─────────────────┐
+          │  │ Process Order  │──┼────▶│ DEX ROUTER      │
+          │  │  1. Routing    │  │     │  - Raydium SDK  │
+          │  │  2. Building   │  │     │  - Meteora SDK  │
+          │  │  3. Execute    │  │     │  - Price Compare│
+          │  └────────────────┘  │     └─────────────────┘
+          └───────────┬──────────┘
+                      │
+          ┌───────────▼──────────────────────────┐
+          │   WEBSOCKET SERVICE                  │
+          │  - Broadcast status updates          │
+          │  - Maintain active connections       │
+          │  - Emit: pending→routing→confirmed   │
+          └───────────┬──────────────────────────┘
+                      │
+          ┌───────────▼──────────┐
+          │   PERSISTENCE        │
+          │  ┌────────────────┐  │
+          │  │  PostgreSQL    │  │  (Order history)
+          │  │  - Orders      │  │
+          │  │  - Audit trail │  │
+          │  └────────────────┘  │
+          │  ┌────────────────┐  │
+          │  │     Redis      │  │  (Active orders)
+          │  │  - Queue jobs  │  │
+          │  │  - Rate limit  │  │
+          │  └────────────────┘  │
+          └──────────────────────┘
 ```
 
-### Order Lifecycle States
+### Order Execution Flow (6 Stages)
 
 ```
-pending → routing → building → submitted → confirmed
-                                     ↓
-                                  failed (with retry)
+┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+│ PENDING  │───▶│ ROUTING  │───▶│ BUILDING │───▶│SUBMITTED │───▶│CONFIRMED │    │  FAILED  │
+│ Queued   │    │Comparing │    │Creating  │    │Sent to   │    │TX Success│    │  Retry   │
+│          │    │DEX quotes│    │TX        │    │Network   │    │          │◀───│  3x Max  │
+└──────────┘    └──────────┘    └──────────┘    └──────────┘    └──────────┘    └──────────┘
+   0.1s            0.2-0.4s         0.3s           2-3s            Final          Error
 ```
 
-### Order Submission Flow
+**Detailed Flow:**
 
-1. **Client submits order** via `POST /api/orders/execute` with order details in request body
-2. **Server validates** the order request (token pair, amount, slippage)
-3. **Server returns** `orderId` and WebSocket upgrade URL immediately in HTTP response
-4. **Client upgrades connection** to WebSocket at same endpoint: `GET /api/orders/execute?orderId={id}`
-5. **Order is queued** in BullMQ for asynchronous processing
-6. **Status updates** stream back through the upgraded WebSocket as the order progresses through 6 states
-
-**HTTP → WebSocket Pattern:**  
-This implementation uses a **single endpoint** (`/api/orders/execute`) that handles both HTTP POST for order creation and WebSocket upgrade for streaming. The client first POSTs to create the order, receives the orderId, then immediately upgrades to WebSocket on the same endpoint with the orderId as a query parameter. This provides a clean separation while maintaining endpoint consistency.
+1. **PENDING** - Order received via API, validated, queued in BullMQ
+2. **ROUTING** - DEX router fetches quotes from Raydium & Meteora in parallel, compares prices
+3. **BUILDING** - Transaction constructed with selected DEX route and slippage protection
+4. **SUBMITTED** - Transaction sent to Solana network (mock: simulated 2-3s network latency)
+5. **CONFIRMED** - Transaction finalized on-chain, returns txHash and execution details
+6. **FAILED** - If any step fails, retry with exponential backoff (max 3 attempts)
 
 ---
 
-## 🎨 Web Interface
+## ✨ Features
 
-**Access the UI**: Open http://localhost:3000 in your browser after starting the server.
+### Core Functionality
+- ✅ **Market Order Execution** - Immediate execution at current market prices
+- ✅ **Multi-DEX Routing** - Automatic routing between Raydium and Meteora
+- ✅ **Real-time WebSocket Updates** - 6-stage order lifecycle streaming
+- ✅ **Concurrent Processing** - Handle up to 10 orders simultaneously
+- ✅ **Queue Management** - BullMQ with Redis, 100 orders/minute throughput
+- ✅ **Retry Logic** - Exponential backoff, max 3 attempts
+- ✅ **Slippage Protection** - Configurable tolerance (default 0.5%)
 
-### Features:
-- 📝 **Interactive Order Form** - Submit orders with dropdown token selection and quick amount buttons
-- 📊 **Real-Time Dashboard** - Watch orders progress through all 6 states live
-- 📈 **Live Statistics** - Track total, active, and completed orders
-- 🔍 **Detailed Timeline** - See complete history for each order
-- 💡 **Connection Status** - Visual indicator showing server connectivity
-- 🎯 **Multiple Concurrent Orders** - Submit multiple orders and watch them process simultaneously
-
-The web UI uses WebSocket connections just like the API, providing a visual demonstration of the entire order lifecycle.
-
----
-
-## 🚀 Features
-
-- ✅ **Market Order Execution** - Immediate swap at current prices
-- ✅ **DEX Routing** - Compares Raydium & Meteora quotes in parallel
-- ✅ **Best Price Selection** - Routes to DEX with highest output after fees
-- ✅ **WebSocket Streaming** - Real-time status updates for order lifecycle
-- ✅ **Concurrent Processing** - 10 concurrent workers, 100 orders/minute
-- ✅ **Retry Logic** - Exponential backoff (max 3 attempts)
-- ✅ **Mock Implementation** - Realistic DEX behavior without blockchain dependency
-- ✅ **PostgreSQL** - Persistent order history
-- ✅ **Redis** - Queue management & caching
+### Technical Excellence
+- ✅ **HTTP → WebSocket Upgrade** - Single endpoint for both protocols
+- ✅ **Price Comparison** - Real-time quote comparison across DEXs
+- ✅ **Transaction Proof** - Solana Explorer links (devnet mock)
+- ✅ **Comprehensive Testing** - 23 unit/integration tests
+- ✅ **Production-Ready** - Deployed on Render.com with PostgreSQL + Redis
+- ✅ **Monitoring** - Structured logging with Pino
 
 ---
 
-## 📦 Tech Stack
+## 🛠️ Tech Stack
 
-| Layer | Technology |
-|-------|-----------|
-| Runtime | Node.js 18+ |
-| Language | TypeScript |
-| Framework | Fastify |
-| WebSocket | @fastify/websocket |
-| Queue | BullMQ |
-| Database | PostgreSQL + Prisma |
-| Cache | Redis |
-| Testing | Jest |
-| Validation | Zod |
+### Backend
+- **Runtime:** Node.js 18+ with TypeScript 5.0
+- **Web Framework:** Fastify 4.x (native WebSocket support)
+- **Queue System:** BullMQ 5.x + Redis 7.x
+- **Database:** PostgreSQL 15 (Prisma ORM)
+- **Caching:** Redis (active orders + rate limiting)
+
+### DEX Integration (Mock)
+- **Raydium:** Simulated with 0.30% fee, ±2% price variance
+- **Meteora:** Simulated with 0.20% fee, ±2.5% price variance
+- **Latency:** 200-400ms per quote (realistic network simulation)
+
+### Testing & Quality
+- **Testing:** Jest with 23 passing tests
+- **Coverage:** Unit tests (DEX routing, validation) + Integration tests (queue, WebSocket)
+- **Linting:** ESLint + Prettier
+- **Type Safety:** Strict TypeScript
+
+### Deployment
+- **Hosting:** Render.com (Free Tier)
+- **Database:** Render PostgreSQL (90-day retention)
+- **Cache:** Render Redis Key-Value Store
+- **CI/CD:** GitHub auto-deploy on push to main
 
 ---
 
-## 🛠️ Setup Instructions
+## 🚀 Getting Started
 
 ### Prerequisites
-
-- Node.js 18+
-- Docker & Docker Compose
-- npm or yarn
-
-### 1. Clone Repository
-
 ```bash
-git clone <repository-url>
+node >= 18.0.0
+npm >= 9.0.0
+docker (optional, for local Redis/PostgreSQL)
+```
+
+### Installation
+
+1. **Clone the repository**
+```bash
+git clone https://github.com/SAMMILLERR/dex-order-engine.git
 cd dex-order-engine
 ```
 
-### 2. Install Dependencies
-
+2. **Install dependencies**
 ```bash
 npm install
 ```
 
-### 3. Setup Environment
-
+3. **Set up environment variables**
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` if needed (defaults work for local development).
+Edit `.env`:
+```env
+# Database
+DATABASE_URL="postgresql://user:pass@localhost:5432/dex_orders"
 
-### 4. Start Infrastructure
+# Redis
+REDIS_HOST="localhost"
+REDIS_PORT=6379
+REDIS_PASSWORD=""
+# OR for cloud deployment:
+REDIS_URL="redis://user:pass@host:port"
 
-```bash
-npm run docker:up
+# Server
+NODE_ENV="development"
+PORT=3000
+HOST="0.0.0.0"
+
+# Queue Configuration
+QUEUE_CONCURRENCY=10
+MAX_RETRIES=3
+RETRY_DELAY=2000
+
+# Mock DEX Settings
+DEX_FAILURE_RATE=0.2  # 20% failure for testing retry logic
 ```
 
-This starts PostgreSQL and Redis in Docker containers.
-
-### 5. Setup Database
-
+4. **Run database migrations**
 ```bash
-npm run prisma:generate
-npm run prisma:migrate
+npx prisma migrate dev
 ```
 
-### 6. Start Application
-
-**Development mode (with hot reload):**
+5. **Start the server**
 ```bash
+# Development (with hot reload)
 npm run dev
-```
 
-**Production mode:**
-```bash
+# Production
 npm run build
 npm start
 ```
 
-Server runs on `http://localhost:3000`
+Server will start at `http://localhost:3000`
+
+### Docker Setup (Optional)
+
+```bash
+# Start PostgreSQL + Redis
+docker-compose up -d
+
+# Run migrations
+npx prisma migrate dev
+
+# Start server
+npm run dev
+```
 
 ---
 
-## 📡 API Endpoints
+## 📡 API Documentation
 
-### Submit Order & Stream Updates (Single Endpoint)
+### Base URL
+- **Local:** `http://localhost:3000`
+- **Production:** `https://dex-order-engine-7jt2.onrender.com`
 
-**HTTP POST:** `POST /api/orders/execute`
+### Endpoints
 
-**Request Body:**
-```json
-{
-  "tokenIn": "SOL",
-  "tokenOut": "USDC",
-  "amount": 1.5,
-  "slippage": 0.01
-}
-```
-
-**Response:**
-```json
-{
-  "orderId": "ord_abc123",
-  "status": "pending",
-  "websocketUrl": "/api/orders/execute?orderId=ord_abc123",
-  "message": "Order created. Upgrade connection to WebSocket for live updates."
-}
-```
-
-**WebSocket Upgrade:** `ws://localhost:3000/api/orders/execute?orderId=ord_abc123`
-
-**WebSocket Messages:**
-```json
-// Initial status
-{
-  "orderId": "ord_abc123",
-  "status": "pending",
-  "timestamp": "2025-11-19T10:30:00.123Z"
-}
-
-// Routing status
-{
-  "orderId": "ord_abc123",
-  "status": "routing",
-  "data": {
-    "selectedDex": "meteora",
-    "price": "181.20",
-    "estimatedAmountOut": "271.43"
-  }
-}
-
-// Confirmed
-{
-  "orderId": "ord_abc123",
-  "status": "confirmed",
-  "data": {
-    "txHash": "5kP7j...",
-    "dex": "meteora",
-    "executedPrice": "181.18",
-    "actualAmountOut": "271.40",
-    "explorerUrl": "https://solscan.io/tx/..."
-  }
-}
-```
-
-**Pattern:** Same endpoint handles both HTTP POST and WebSocket upgrade - true HTTP → WebSocket pattern!
-
-### Get Order Status
-
-```bash
-GET /api/orders/:orderId
-```
-
-**Response:**
-```json
-{
-  "order": {
-    "id": "ord_abc123",
-    "status": "confirmed",
-    "tokenIn": "SOL",
-    "tokenOut": "USDC",
-    "amount": 1.5,
-    "dex": "meteora",
-    "txHash": "5kP7j...",
-    "executedPrice": 181.18,
-    "actualAmountOut": 271.40
-  }
-}
-```
-
-### Health Check
-
-```bash
+#### 1. Health Check
+```http
 GET /api/health
 ```
 
@@ -265,17 +293,197 @@ GET /api/health
 ```json
 {
   "status": "ok",
-  "services": {
-    "database": "connected",
-    "redis": "connected",
-    "queue": "operational"
-  },
-  "queue": {
-    "waiting": 2,
-    "active": 5,
-    "completed": 143,
-    "failed": 3
+  "timestamp": "2025-11-20T12:00:00.000Z"
+}
+```
+
+---
+
+#### 2. Create Order (HTTP → WebSocket)
+```http
+POST /api/orders/execute
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "tokenIn": "So11111111111111111111111111111111111111112",  // SOL mint
+  "tokenOut": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC mint
+  "amount": 1.5,
+  "slippage": 0.5  // Optional, default 0.5%
+}
+```
+
+**HTTP Response (201 Created):**
+```json
+{
+  "orderId": "ord_abc123def456",
+  "status": "pending",
+  "websocketUrl": "/api/orders/execute?orderId=ord_abc123def456",
+  "message": "Order created. Upgrade connection to WebSocket for live updates."
+}
+```
+
+**WebSocket Upgrade:**
+After receiving orderId, upgrade the same connection to WebSocket:
+```javascript
+const ws = new WebSocket(`ws://localhost:3000/api/orders/execute?orderId=ord_abc123def456`);
+```
+
+---
+
+#### 3. Get Order Status
+```http
+GET /api/orders/:orderId
+```
+
+**Response:**
+```json
+{
+  "order": {
+    "id": "ord_abc123def456",
+    "status": "confirmed",
+    "tokenIn": "So11111111111111111111111111111111111111112",
+    "tokenOut": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amount": 1.5,
+    "slippage": 0.5,
+    "dex": "raydium",
+    "executedPrice": 180.50,
+    "actualAmountOut": 270.75,
+    "txHash": "5j8k2L3m4N5o6P7q8R9s0T1u2V3w4X5y6Z7a8B9c0D1e2F3g4H5i6J7k8L9m0N1o",
+    "attempts": 1,
+    "createdAt": "2025-11-20T12:00:00.000Z",
+    "completedAt": "2025-11-20T12:00:03.500Z"
   }
+}
+```
+
+---
+
+#### 4. List Orders
+```http
+GET /api/orders?limit=20&status=confirmed
+```
+
+**Query Parameters:**
+- `limit` (optional): Number of orders to return (default: 20, max: 100)
+- `status` (optional): Filter by status (pending | routing | building | submitted | confirmed | failed)
+
+**Response:**
+```json
+{
+  "orders": [
+    {
+      "id": "ord_abc123",
+      "status": "confirmed",
+      "amount": 1.5,
+      "dex": "raydium",
+      "createdAt": "2025-11-20T12:00:00.000Z"
+    }
+  ],
+  "total": 1,
+  "limit": 20
+}
+```
+
+---
+
+## 🔌 WebSocket Protocol
+
+### Connection Flow
+
+1. **Create Order** via POST `/api/orders/execute`
+2. **Receive orderId** in response
+3. **Upgrade to WebSocket** using same endpoint with query param
+
+### WebSocket Messages
+
+#### Client → Server
+```json
+{
+  "action": "ping"
+}
+```
+
+#### Server → Client (Status Updates)
+
+**Pending:**
+```json
+{
+  "orderId": "ord_abc123",
+  "status": "pending",
+  "timestamp": "2025-11-20T12:00:00.000Z",
+  "data": {
+    "message": "Order received and queued"
+  }
+}
+```
+
+**Routing:**
+```json
+{
+  "orderId": "ord_abc123",
+  "status": "routing",
+  "timestamp": "2025-11-20T12:00:00.200Z",
+  "data": {
+    "message": "Best route selected: raydium",
+    "selectedDex": "raydium",
+    "price": 180.50,
+    "estimatedAmountOut": 270.75
+  }
+}
+```
+
+**Building:**
+```json
+{
+  "orderId": "ord_abc123",
+  "status": "building",
+  "timestamp": "2025-11-20T12:00:00.500Z",
+  "data": {
+    "message": "Creating transaction on raydium..."
+  }
+}
+```
+
+**Submitted:**
+```json
+{
+  "orderId": "ord_abc123",
+  "status": "submitted",
+  "timestamp": "2025-11-20T12:00:00.800Z",
+  "data": {
+    "message": "Transaction sent to network..."
+  }
+}
+```
+
+**Confirmed:**
+```json
+{
+  "orderId": "ord_abc123",
+  "status": "confirmed",
+  "timestamp": "2025-11-20T12:00:03.500Z",
+  "data": {
+    "message": "Transaction confirmed!",
+    "txHash": "5j8k2L3m4N5o6P7q8R9s0T1u2V3w4X5y6Z7a8B9c0D1e2F3g4H5i6J7k8L9m0N1o",
+    "dex": "raydium",
+    "executedPrice": 180.50,
+    "actualAmountOut": 270.75,
+    "explorerUrl": "https://solscan.io/tx/5j8k2L3m...?cluster=devnet",
+    "duration": "3.50s"
+  }
+}
+```
+
+**Failed:**
+```json
+{
+  "orderId": "ord_abc123",
+  "status": "failed",
+  "timestamp": "2025-11-20T12:00:02.000Z",
+  "error": "Slippage tolerance exceeded - Price moved beyond acceptable range"
 }
 ```
 
@@ -284,225 +492,263 @@ GET /api/health
 ## 🧪 Testing
 
 ### Run All Tests
-
 ```bash
 npm test
 ```
 
-### Run Tests with Coverage
-
-```bash
-npm run test:watch
-```
-
 ### Test Coverage
-
-- ✅ DEX routing logic
-- ✅ Quote comparison
-- ✅ Order validation
-- ✅ Mock DEX services
-- ✅ Helper functions
-- ✅ Error handling
-
-**Target:** >70% coverage across all files
-
----
-
-## 📝 Postman Collection
-
-Import `postman/dex-order-engine.postman_collection.json` into Postman.
-
-### Example: Submit Order
-
-1. Open WebSocket request in Postman
-2. Connect to `ws://localhost:3000/api/orders/execute?tokenIn=SOL&tokenOut=USDC&amount=1.5&slippage=0.01`
-3. Watch real-time status updates
-
-### Example: Submit 5 Orders Concurrently
-
-Use Postman Runner with the provided collection to submit multiple orders simultaneously and observe concurrent processing.
-
----
-
-## 🎬 Demo Video
-
-**Video Link:** [YouTube Demo](YOUR_VIDEO_LINK_HERE)
-
-**What's Shown:**
-- Order submission via WebSocket
-- DEX routing decision logs
-- Real-time status updates (pending → routing → confirmed)
-- Queue processing 5 concurrent orders
-- Transaction hash and explorer links
-
----
-
-## 🚀 Deployment
-
-### Deploy to Railway
-
 ```bash
-# Install Railway CLI
-npm i -g @railway/cli
-
-# Login
-railway login
-
-# Initialize project
-railway init
-
-# Add PostgreSQL and Redis
-railway add postgresql
-railway add redis
-
-# Deploy
-railway up
+npm run test:coverage
 ```
 
-### Deploy to Render
-
-1. Create new Web Service
-2. Connect GitHub repository
-3. Add PostgreSQL and Redis add-ons
-4. Set environment variables
-5. Deploy
-
-**Public URL:** https://your-app.onrender.com
-
----
-
-## 🔍 DEX Routing Logic
-
-### Quote Comparison Example
-
+### Test Results
 ```
-Order: 1.5 SOL → USDC
-
-Raydium Quote:
-  Price: $180.15
-  Fee: 0.3%
-  Amount Out: $269.61
-
-Meteora Quote:
-  Price: $181.20
-  Fee: 0.2%
-  Amount Out: $271.43
-
-✅ Selected: Meteora (+0.68% improvement)
+Test Suites: 4 passed, 4 total
+Tests:       23 passed, 23 total
+Snapshots:   0 total
+Time:        ~12s
 ```
 
-### Logging Output
+### Test Categories
 
-```
-[INFO] DEX Routing Decision:
-  raydium: { price: '180.15', fee: '0.30%', amountOut: '269.61', liquidity: '$5.23M' }
-  meteora: { price: '181.20', fee: '0.20%', amountOut: '271.43', liquidity: '$4.87M' }
-  selected: 'meteora'
-  improvement: '+0.68%'
+#### Unit Tests (15 tests)
+- ✅ DEX Router: Quote comparison, route selection, swap execution
+- ✅ Order Validation: Input validation, schema checks
+- ✅ Mock DEX Services: Raydium/Meteora quote generation
+- ✅ Helper Functions: ID generation, backoff calculation
+
+#### Integration Tests (8 tests)
+- ✅ Order Service: CRUD operations, status updates
+- ✅ Queue: Job processing, concurrent execution, retry logic
+- ✅ WebSocket Service: Connection lifecycle, broadcasting
+
+### Run Specific Test Suites
+```bash
+# DEX routing tests
+npm test -- dex-router
+
+# Queue tests
+npm test -- queue
+
+# WebSocket tests
+npm test -- websocket
 ```
 
 ---
 
-## 🏗️ Project Structure
+## 🌐 Deployment
 
+### Production Deployment (Render.com)
+
+**🔗 Live URL:** [https://dex-order-engine-7jt2.onrender.com](https://dex-order-engine-7jt2.onrender.com)
+
+#### Services
+
+1. **Web Service**
+   - Type: Web Service
+   - Build Command: `npm install --include=dev && npx prisma generate && npx prisma migrate deploy && npm run build`
+   - Start Command: `npm start`
+   - Environment: Node.js 18
+
+2. **PostgreSQL Database**
+   - Type: PostgreSQL 15
+   - Instance: Free (90-day data retention)
+   - Connection: Internal URL for app, External for migrations
+
+3. **Redis Cache**
+   - Type: Key-Value Store
+   - Size: 25MB (Free tier)
+   - Policy: volatile-ttl
+
+#### Environment Variables (Render)
+```env
+DATABASE_URL=<render-postgres-internal-url>
+REDIS_URL=<render-redis-url>
+NODE_ENV=production
+PORT=3000
+HOST=0.0.0.0
+QUEUE_CONCURRENCY=10
+MAX_RETRIES=3
+RETRY_DELAY=2000
+DEX_FAILURE_RATE=0.2
 ```
-dex-order-engine/
-├── src/
-│   ├── api/
-│   │   ├── routes/
-│   │   │   ├── orders.route.ts      # Order submission & WebSocket
-│   │   │   └── health.route.ts      # Health check
-│   │   └── server.ts                # Fastify setup
-│   ├── services/
-│   │   ├── raydium.service.ts       # Mock Raydium DEX
-│   │   ├── meteora.service.ts       # Mock Meteora DEX
-│   │   ├── dex-router.service.ts    # Quote comparison
-│   │   ├── websocket.service.ts     # WebSocket manager
-│   │   └── order.service.ts         # Order business logic
-│   ├── queue/
-│   │   ├── order.queue.ts           # BullMQ setup
-│   │   └── order.worker.ts          # Order processor
-│   ├── db/
-│   │   ├── prisma.ts                # Prisma client
-│   │   └── redis.ts                 # Redis client
-│   ├── utils/
-│   │   ├── logger.ts                # Winston logger
-│   │   └── helpers.ts               # Utilities
-│   ├── types/
-│   │   └── index.ts                 # TypeScript types
-│   ├── config/
-│   │   └── index.ts                 # Configuration
-│   └── index.ts                     # Entry point
-├── prisma/
-│   └── schema.prisma                # Database schema
-├── postman/
-│   └── collection.json              # API collection
-└── __tests__/                       # Test files
-```
+
+#### Deployment Steps
+See [RENDER_DEPLOYMENT.md](./RENDER_DEPLOYMENT.md) for detailed instructions.
+
+### Alternative Free Hosting Options
+- **Fly.io** - 3 free VMs + Postgres + Redis
+- **Railway** - $5 free credit/month
+- **DigitalOcean App Platform** - $200 free credit
 
 ---
 
-## 🤝 Design Decisions
+## 💡 Design Decisions
 
-### 1. Mock vs Real Implementation
+### 1. Why Fastify over Express?
 
-**Choice:** Mock DEX implementation
+**Chosen:** Fastify 4.x  
+**Rationale:**
+- **Native WebSocket support** via `@fastify/websocket` plugin
+- **2x faster** than Express (important for concurrent order processing)
+- **Built-in schema validation** with JSON Schema
+- **TypeScript-first** with excellent type definitions
 
-**Why:**
-- Faster development and testing
-- No blockchain dependency
-- Reliable execution without network failures
-- Focus on architecture and routing logic
+### 2. Why BullMQ over other queues?
 
-### 2. Market Order First
+**Chosen:** BullMQ 5.x  
+**Rationale:**
+- **Redis-backed** - Fast, reliable, distributed-ready
+- **Concurrent processing** - Easy to configure (10 parallel workers)
+- **Retry logic** - Built-in exponential backoff
+- **Job prioritization** - Can extend for limit/sniper orders
+- **Dashboard** - Bull Board for monitoring (optional)
 
-**Why:**
-- Simplest order type to demonstrate core concepts
-- Clear execution flow
-- Foundation for extending to limit/sniper orders
+### 3. Why Mock DEX Implementation?
 
-### 3. BullMQ Queue System
+**Chosen:** Simulated Raydium/Meteora  
+**Rationale:**
+- **Focus on architecture** - Demonstrates routing logic without blockchain complexity
+- **Realistic behavior** - 200-400ms latency, random failures (20%), price variance
+- **Testability** - Deterministic tests without network dependencies
+- **Cost-effective** - No devnet SOL faucet dependency
+- **Easy extension** - Replace mock classes with real SDKs (same interface)
 
-**Why:**
-- Built-in retry logic with exponential backoff
-- Rate limiting support
-- Redis-backed for persistence
-- Concurrent worker support
+### 4. Why PostgreSQL + Redis (not just Redis)?
 
-### 4. WebSocket for Status Updates
+**Chosen:** Dual storage strategy  
+**Rationale:**
+- **PostgreSQL** - Audit trail, historical queries, complex analytics
+- **Redis** - Active orders, queue jobs, sub-second reads
+- **Best of both** - ACID compliance + speed where needed
 
-**Why:**
-- Real-time updates without polling
-- Efficient for concurrent orders
-- Better UX than REST endpoints
+### 5. Why HTTP → WebSocket Upgrade Pattern?
+
+**Chosen:** Single endpoint, protocol upgrade  
+**Rationale:**
+- **RESTful compatibility** - Standard POST works without WebSocket client
+- **Gradual enhancement** - Poll `/api/orders/:id` if WebSocket unavailable
+- **Single connection** - No separate WebSocket handshake endpoint
+- **Standard pattern** - Used by Socket.io, SignalR, and other real-time libraries
 
 ---
 
 ## 📊 Performance Metrics
 
-- **Latency:** 2-4 seconds per order (mocked network delays)
-- **Throughput:** 100 orders/minute
-- **Concurrency:** 10 concurrent workers
-- **Retry:** Up to 3 attempts with exponential backoff
-- **Success Rate:** ~95% (5% simulated failures)
+### Throughput
+- **Orders/minute:** 100 (rate limited)
+- **Concurrent orders:** 10 simultaneous
+- **Response time (POST):** <50ms
+- **WebSocket latency:** <10ms per update
+
+### Execution Times
+- **Pending → Routing:** 100-200ms
+- **Routing (DEX quotes):** 200-400ms
+- **Building transaction:** 300ms
+- **Submitted → Confirmed:** 2-3s (simulated network)
+- **Total:** ~3-4s per order
+
+### Reliability
+- **Success rate:** 80% (first attempt)
+- **With retries:** 95%+ (3 attempts)
+- **Retry delay:** 2s exponential backoff (2s, 4s, 8s)
 
 ---
 
-## 📜 License
+## 📚 Additional Documentation
 
-MIT
+- **[Architecture Diagram](./ARCHITECTURE.md)** - High-level design overview with flow diagrams
+- **[Deployment Guide](./RENDER_DEPLOYMENT.md)** - Step-by-step Render setup
+- **[Postman Collection](./postman_collection_concurrent.json)** - Concurrent testing (5 orders, 0ms delay)
 
 ---
 
-## 👤 Author
+## 🎬 Demo Video
 
-Your Name - [GitHub](https://github.com/yourusername)
+**📹 YouTube Demo:** [Watch 2-minute demo](#) *(Coming Soon)*
+
+**Demo Script:**
+1. Show 5 concurrent orders submitted via Postman (0ms delay)
+2. WebSocket streaming all status updates in real-time
+3. DEX routing decisions logged in console (Raydium vs Meteora)
+4. Queue processing multiple orders (Render logs)
+5. Final results: 4-5/5 confirmed with TX hashes
+
+---
+
+## 🧰 Postman Collection
+
+Import `postman_collection_concurrent.json` for testing:
+
+**Features:**
+- ✅ Health check
+- ✅ Single order execution
+- ✅ 5 concurrent orders (0ms delay)
+- ✅ Automated test assertions
+- ✅ Statistics (success rate, DEX distribution)
+- ✅ Order status verification
+
+**Run Collection:**
+1. Import into Postman
+2. Set environment variable `BASE_URL` to `http://localhost:3000` or production URL
+3. Open Collection Runner
+4. Set delay to **0ms** (concurrent)
+5. Click "Run"
+6. Watch console for statistics and assertions
+
+---
+
+## 📝 Assignment Requirements Checklist
+
+### Core Functionality
+- ✅ Order execution engine (Market Orders)
+- ✅ DEX routing (Raydium vs Meteora comparison)
+- ✅ WebSocket status updates (6 stages: pending→routing→building→submitted→confirmed/failed)
+- ✅ HTTP → WebSocket upgrade pattern
+- ✅ Transaction proof (Solana Explorer links - mock)
+
+### Technical Requirements
+- ✅ Concurrent processing (10 orders simultaneously, 100/min throughput)
+- ✅ Queue management (BullMQ + Redis)
+- ✅ Retry logic (3 attempts, exponential backoff)
+- ✅ Error handling with failure persistence
+- ✅ Slippage protection
+
+### Deliverables
+- ✅ GitHub repo with clean commits
+- ✅ API with order execution and routing
+- ✅ WebSocket status streaming
+- ✅ Documentation (README + ARCHITECTURE.md + design decisions)
+- ✅ Deployed to free hosting (Render.com)
+- ✅ Public URL included in README
+- ⏳ 2-min YouTube video *(record after testing)*
+- ✅ Postman collection for concurrent testing
+- ✅ 23 unit/integration tests (exceeds 10 requirement)
+
+---
+
+## 🤝 Contributing
+
+This is a demonstration project for technical assessment. For questions or feedback:
+
+**GitHub:** [SAMMILLERR/dex-order-engine](https://github.com/SAMMILLERR/dex-order-engine)
+
+---
+
+## 📄 License
+
+MIT License - see [LICENSE](./LICENSE) file for details.
 
 ---
 
 ## 🙏 Acknowledgments
 
-- Raydium DEX Documentation
-- Meteora DEX Documentation
-- Solana Web3.js
-- Fastify Community
+- **Raydium** - DEX SDK documentation and examples
+- **Meteora** - AMM integration patterns
+- **Solana** - Web3.js library and devnet infrastructure
+- **BullMQ** - Robust queue system for Node.js
+- **Fastify** - High-performance web framework
+
+---
+
+**Built with ❤️ for professional DeFi order execution**
