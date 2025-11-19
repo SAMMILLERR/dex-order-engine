@@ -643,8 +643,8 @@
                     }).join('')}
                 </div>
                 <div class="order-details">
-                    <div class="detail-item">Amount: <span class="detail-value">${order.amount}</span></div>
-                    <div class="detail-item">Slippage: <span class="detail-value">${order.slippage}%</span></div>
+                    <div class="detail-item">Amount: <span class="detail-value">${order.amount || 'N/A'}</span></div>
+                    <div class="detail-item">Slippage: <span class="detail-value">${order.slippage || 0.5}%</span></div>
                     ${order.dex ? `<div class="detail-item">DEX: <span class="detail-value">${order.dex}</span></div>` : ''}
                     ${order.executedPrice ? `<div class="detail-item">Price: <span class="detail-value">${order.executedPrice}</span></div>` : ''}
                     ${order.actualAmountOut ? `<div class="detail-item">Output: <span class="detail-value">${order.actualAmountOut}</span></div>` : ''}
@@ -788,8 +788,8 @@
                         Object.assign(order, {
                             id: orderId,
                             status: data.order.status,
-                            amount: data.order.amount,
-                            slippage: data.order.slippage,
+                            amount: data.order.amount || order.amount,
+                            slippage: data.order.slippage || order.slippage || 0.5,
                             dex: data.order.dex || order.dex,
                             executedPrice: data.order.executedPrice || order.executedPrice,
                             actualAmountOut: data.order.actualAmountOut || order.actualAmountOut,
